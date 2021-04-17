@@ -4,8 +4,7 @@ import time
 import random
 
 from models import get_teacher_by_name, get_class_by_name, get_teacher_main_classes
-import threading
-import time
+
 class Schedule():
     """docstring for Schedule"""
     WEEKDAYS = ('mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun')
@@ -13,7 +12,6 @@ class Schedule():
         self.teachers = teachers
         self.classes = classes
         self.shifts = self.get_shifts()
-        self.schedules = {}
 
     def get_shifts(self):
         all_lessons = []
@@ -44,6 +42,44 @@ class Schedule():
                 print(shift, number_teachers - number_classes)
 
 
+    def create_off_combinations(self):
+        groups = []
+        number_of_combinations = 1
+        for teacher in self.teachers:
+            days_off_possibilities = teacher.get_days_off_possibilities()
+            length = len(days_off_possibilities)
+            number_of_combinations = number_of_combinations*length if length!=0 else number_of_combinations
+            if days_off_possibilities!=[]:
+                groups.append(days_off_possibilities)
+        off_combinations  = itertools.product(*groups)
+        return number_of_combinations, off_combinations
+
+
+    def create_off_combinations_a_day(self, day):
+        groups = []
+        off_possibilities = []
+
+        max_number_classes = 0
+        for shift in self.shifts:
+            if day in shift:
+                number_classes = len([cl for cl in self.classes if shift in cl.time_frames]) 
+                if number_classes > max_number_classes:
+                    max_number_classes = number_classes
+
+        for teacher in self.teachers:
+            days_off_possibilities = teacher.get_days_off_possibilities()
+            for possibility in days_off_possibilities:
+                if any(day in string for string in possibility):
+                    off_possibilities.append(teacher.name)
+
+        off_possibilities = set(off_possibilities)
+        off_combinations = []
+        for r in range(1,len(self.teachers)-max_number_classes+1):
+            off_combinations.extend(itertools.combinations(off_possibilities, r))
+
+        return off_combinations
+
+
 
     def get_least_busy_teacher(self, teachers, considered_type):
         ''' get the leaste busy teacher of each type'''
@@ -72,34 +108,20 @@ class Schedule():
 
 
 
-    def create_off_combinations(self, teacher_type=None):
-        groups = []
-        teachers = []
-        number_of_combinations = 1
-
-        for teacher in self.teachers:
-            if teacher_type==None:
-                teachers = self.teachers
-            else:
-                if teacher_type in teacher.type:
-                    teachers.append(teacher)
-
-        for teacher in teachers:
-            days_off_possibilities = teacher.get_days_off_possibilities()
-            length = len(days_off_possibilities)
-            number_of_combinations = number_of_combinations*length if length!=0 else number_of_combinations
-            if days_off_possibilities!=[]:
-                groups.append(days_off_possibilities)
-        off_combinations  = itertools.product(*groups)
-        return number_of_combinations, off_combinations
 
 
+    def find_best_schedule_for_day(self,day):
+        i=0
+        off_combinations = self.create_off_combinations_a_day(day)
+        schedules = {}
+        for off_combination in off_combinations:
+            #print(off_combination)
+            schedule = self.put_schedule_day(off_combination, day)
+            schedules[off_combination] = self.put_schedule_day(off_combination, day)
+            #self.print_schedule(schedule)
+            #print(self.calculate_assessments(schedule)['native usage'])
+        print(len(schedules))
 
-
-
-
-
-    def filter_best_schedule(self, schedules):
 
         print('filter unprocessed class')
         temp_schedules = {}
@@ -135,6 +157,7 @@ class Schedule():
         print(len(schedules))
 
 
+ 
         print('filter min parttime teacher usage')
         temp_schedules = {}
         min_val = min([self.calculate_assessments(schedule)['parttime usage'] for schedule in schedules.values()])
@@ -145,6 +168,7 @@ class Schedule():
         schedules = temp_schedules
         temp_schedules = {}
         print(len(schedules))
+
 
 
         print('filter teacher balance')
@@ -159,22 +183,247 @@ class Schedule():
         print(len(schedules))
 
 
-        # select random best off combination
-        print('total left: ', len(list(schedules.keys())))
-        best_off_combination = random.choice(list(schedules.keys()))
-        print(best_off_combination, ' ---- off for this week')
+
+        for off_combination, shedule in schedules.items():
+            print(off_combination)
+            self.print_schedule(shedule)
+
+
+        '''
+        print('number of lessons having main teachers: {}/{} lessons'.format(right_teacher_count,len(schedule_flat_list)))
+        print('number of lessons having native teachers: {}/{} lessons'.format(native_teacher_count,len(schedule_flat_list)))
+        print('number of lessons using vn parttime teachers: {}/{} lessons'.format(parttime_teacher_count,len(schedule_flat_list)))
+        print('teacher lessont count balance rate: {}/{} ({})'.format(min(lesson_counts),max(lesson_counts),min(lesson_counts)/max(lesson_counts)))
+        '''
+
+
+
+
+    def put_schedule_day(self, off_combination, day):
+        for cl in self.classes:
+            cl.reset_lesson_numbers()
+        for teacher in self.teachers:
+            teacher.lesson_count = 0
+
+
+        class_teacher_allocations = {shift: [] for shift in self.shifts if day in shift}
+
+        # get available teacher
+        available_teachers = [teacher for teacher in self.teachers
+                              if not any(teacher.name in element for element in off_combination)]
+
+        # get shift then filter shift on the processing day
+        day_shifts = list(filter(lambda shift: day in shift, self.shifts))
+        class_list = {shift: [] for shift in day_shifts}
+        teacher_list = {shift: [] for shift in day_shifts}
+
+        # create class list and teacher list for a shift in the proccessing day
+        for shift in day_shifts:
+            class_list[shift] = [cl for cl in self.classes
+                                 if shift in cl.time_frames]
+            teacher_list[shift] = available_teachers
+
+
+        #ALLOCATIONS:
+        for shift in day_shifts:
+            if len(teacher_list[shift]) < len(class_list[shift]):
+                return False #'not enough teachers for this case'
+
+            # sort the class_list based on native percentage
+            temp_list_to_reorder_classes = [cl.get_native_need_rate() for cl in class_list[shift]]
+            class_list[shift] = [cl for temp,cl in sorted(zip(temp_list_to_reorder_classes, class_list[shift]), key=lambda pair: pair[0])]
+
+            # allocate native teachers to their classes: regular or smartchoice based of the need of native rate
+            for cl in class_list[shift]:
+                if any(cl.class_name in string for string in class_teacher_allocations[shift]): continue # check if this class done
+                for teacher in teacher_list[shift]:
+                    if any(teacher.name in string for string in class_teacher_allocations[shift]): continue # check if teacher done
+                    # place native teacher to their main classes if possible, if not => next
+                    if cl.teacher is teacher and teacher.type=='ntfulltime':
+                        if cl.get_native_need_rate() < 100: # calcuate the percentage of native teacher in SC classes
+                            temp = cl.class_name + ' - ' +teacher.name + ' - native: ' + str(cl.get_native_need_rate()) + ' - main vn: ' + str(cl.get_main_vn_teacher_need_rate())
+                            class_teacher_allocations[shift].append(temp)
+                            cl.increase_native_lesson_count()
+                            cl.increase_learned_lesson_number()
+                            teacher.lesson_count += 1
+                            break
+
+                if any(cl.class_name in string for string in class_teacher_allocations[shift]): continue # check if this class done
+                for teacher in teacher_list[shift]:
+                    if any(teacher.name in string for string in class_teacher_allocations[shift]): continue # check if this teacher done
+                    # place native teacher to any in-need class
+                    if teacher.type in ['ntfulltime','ntparttime']:
+                        if cl.get_native_need_rate() < 100: # calcuate the percentage of native teacher 
+                            temp = cl.class_name + ' - ' +teacher.name + ' - native: ' + str(cl.get_native_need_rate()) + ' - main vn: ' + str(cl.get_main_vn_teacher_need_rate())
+                            class_teacher_allocations[shift].append(temp)
+                            cl.increase_native_lesson_count()
+                            cl.increase_learned_lesson_number()
+                            teacher.lesson_count += 1
+                            break
+
+                # after this allocation, native teachers might not be allocated to any classes because the need rate is high
+                # need to allocate these teachers later
+
+
+            # allocate full time and part time vietnamese teachers to their classes: regular based of the need of vn rate
+            for cl in class_list[shift]:
+                if any(cl.class_name in string for string in class_teacher_allocations[shift]): continue # check if this class done
+                for teacher in teacher_list[shift]:
+                    if any(teacher.name in string for string in class_teacher_allocations[shift]): continue # check if teacher done
+                    # place full time vietnamese teacher to their main classes
+                    if cl.teacher is teacher and teacher.type=='vnfulltime':
+                        temp = cl.class_name + ' - ' +teacher.name + ' - native: ' + str(cl.get_native_need_rate()) + ' - main vn: ' + str(cl.get_main_vn_teacher_need_rate())
+                        class_teacher_allocations[shift].append(temp)
+                        cl.increase_main_vn_teacher_lesson_count()
+                        cl.increase_learned_lesson_number()
+                        teacher.lesson_count += 1
+                        break
+
+                
+                    if cl.teacher is teacher and teacher.type=='vnparttime':
+                        if cl.get_main_vn_teacher_need_rate() < 66.7: #100*2/3 calcuate the percentage of vn partime main teacher in regular classes
+                            temp = cl.class_name + ' - ' +teacher.name + ' - native: ' + str(cl.get_native_need_rate()) + ' - main vn: ' + str(cl.get_main_vn_teacher_need_rate())
+                            class_teacher_allocations[shift].append(temp)
+                            cl.increase_main_vn_teacher_lesson_count()
+                            cl.increase_learned_lesson_number()
+                            teacher.lesson_count += 1
+                            break
+            
+            # allocate full time native teachers to their classes, dont care about any rate
+            for cl in class_list[shift]:
+                if any(cl.class_name in string for string in class_teacher_allocations[shift]): continue # check if this class done
+                for teacher in teacher_list[shift]:
+                    if any(teacher.name in string for string in class_teacher_allocations[shift]): continue # check if teacher done
+                    # place native teacher to their main classes if possible, if not => next
+                    if cl.teacher is teacher and teacher.type == 'ntfulltime':
+                        temp = cl.class_name + ' - ' +teacher.name + ' - native: ' + str(cl.get_native_need_rate()) + ' - main vn: ' + str(cl.get_main_vn_teacher_need_rate())
+                        class_teacher_allocations[shift].append(temp)
+                        cl.increase_native_lesson_count()
+                        cl.increase_learned_lesson_number()
+                        teacher.lesson_count += 1
+                        break
         
-        return best_off_combination, schedules[best_off_combination]
+
+            #==============================================
+            # allocate teachers left to classes
+            remaining_fulltime_teachers = []
+            for teacher in teacher_list[shift]:
+                if not any(teacher.name in string for string in class_teacher_allocations[shift]): # check if teacher done
+                    if teacher.type=='vnfulltime':
+                        remaining_fulltime_teachers.append(teacher)
+     
+            remaining_teachers = []
+            for teacher in teacher_list[shift]:
+                if not any(teacher.name in string for string in class_teacher_allocations[shift]): # check if teacher done
+                    remaining_teachers.append(teacher)
+
+            remaining_classes = []
+            for cl in class_list[shift]:
+                if not any(cl.class_name in string for string in class_teacher_allocations[shift]): # check if this class done
+                    remaining_classes.append(cl)
 
 
-    def put_schedule_week(self, off_combination):
+            # get list of classes which have main teacher as parttime
+            temp_classes_for_part_time_teachers = []
+            temp_parttime_teachers_allocation = []
+            for cl in remaining_classes:
+                for teacher in remaining_teachers:
+                    if cl.teacher is teacher:
+                        temp_classes_for_part_time_teachers.append(cl)
+                        temp_parttime_teachers_allocation.append(teacher)
+                        break
+
+
+            # arrange remaining full time teachers to remaining classes which dont have main teacher 
+            for cl in remaining_classes:
+                if cl not in temp_classes_for_part_time_teachers:
+                    proper_teachers = []
+                    for teacher in remaining_teachers:
+                        if cl.class_name not in teacher.improper_class_names and teacher not in temp_parttime_teachers_allocation:
+                            if not any(teacher.name in string for string in class_teacher_allocations[shift]):
+                                proper_teachers.append(teacher)
+                
+                    least_busy_teacher = self.get_least_busy_teacher(proper_teachers, 'vnfulltime')
+                    if least_busy_teacher!=None:
+                        temp = 'arrange remaining full time teachers to remaining classes which dont have main teacher ' + cl.class_name + ' - ' +least_busy_teacher.name + ' - native: ' + str(cl.get_native_need_rate()) + ' - main vn: ' + str(cl.get_main_vn_teacher_need_rate())
+                        class_teacher_allocations[shift].append(temp)
+                        cl.increase_learned_lesson_number()
+                        teacher.lesson_count += 1
+
+
+
+            # arrange remaining part time teachers remaining classes which dont have main teacher 
+            for cl in remaining_classes:
+                if any(cl.class_name in string for string in class_teacher_allocations[shift]): continue # check if this class done
+                if cl not in temp_classes_for_part_time_teachers:
+                    proper_teachers = []
+                    for teacher in remaining_teachers:
+                        if cl.class_name not in teacher.improper_class_names and teacher not in temp_parttime_teachers_allocation:
+                            if not any(teacher.name in string for string in class_teacher_allocations[shift]):
+                                proper_teachers.append(teacher)
+
+                    least_busy_teacher = self.get_least_busy_teacher(proper_teachers, 'vnparttime')
+                    if least_busy_teacher!=None:
+
+                        temp = 'arrange remaining part time teachers remaining classes which dont have main teacher ' + cl.class_name + ' - ' +least_busy_teacher.name + ' - native: ' + str(cl.get_native_need_rate()) + ' - main vn: ' + str(cl.get_main_vn_teacher_need_rate())
+                        class_teacher_allocations[shift].append(temp)
+                        cl.increase_learned_lesson_number()
+                        teacher.lesson_count += 1
+
+            # TODO: 
+
+
+            # arrange remaining full time teachers to partime classes which have main teacher 
+            # todo: get check which class is proper to take back (random or priority)
+            for cl in temp_classes_for_part_time_teachers:
+                proper_teachers = []
+                for teacher in remaining_teachers:
+                    if cl.class_name not in teacher.improper_class_names:
+                        if not any(teacher.name in string for string in class_teacher_allocations[shift]):
+                            proper_teachers.append(teacher)
+                
+                least_busy_teacher = self.get_least_busy_teacher(proper_teachers, 'vnfulltime')
+                if least_busy_teacher!=None:
+                    temp = 'arrange remaining full time teachers to partime classes which have main teacher ' + cl.class_name + ' - ' +least_busy_teacher.name + ' - native: ' + str(cl.get_native_need_rate()) + ' - main vn: ' + str(cl.get_main_vn_teacher_need_rate())
+                    class_teacher_allocations[shift].append(temp)
+                    cl.increase_learned_lesson_number()
+                    teacher.lesson_count += 1
+
+
+            # allocate part time vietnamese teachers to their classes remaining:
+            for cl in class_list[shift]:
+                if any(cl.class_name in string for string in class_teacher_allocations[shift]): continue # check if this class done
+                for teacher in teacher_list[shift]:
+                    if any(teacher.name in string for string in class_teacher_allocations[shift]): continue # check if teacher done
+                    # place full time vietnamese teacher to their main classes
+                    if cl.teacher is teacher:
+                        temp = cl.class_name + ' - ' +teacher.name + ' - native: ' + str(cl.get_native_need_rate()) + ' - main vn: ' + str(cl.get_main_vn_teacher_need_rate())
+                        class_teacher_allocations[shift].append(temp)
+                        cl.increase_main_vn_teacher_lesson_count()
+                        cl.increase_learned_lesson_number()
+                        teacher.lesson_count += 1
+                        break
+
+            # teachers and classes left after apply filters above
+            for teacher in teacher_list[shift]:
+                if not any(teacher.name in string for string in class_teacher_allocations[shift]): # check if teacher done
+                    class_teacher_allocations[shift].append('redundant teacher: ' + teacher.name)
+            for cl in class_list[shift]:
+                if not any(cl.class_name in string for string in class_teacher_allocations[shift]): # check if this class done
+                    temp = 'unprocessed class: ' + cl.class_name  + ' - native: ' + str(cl.get_native_need_rate()) + ' - main vn: ' + str(cl.get_main_vn_teacher_need_rate())
+                    class_teacher_allocations[shift].append(temp)
+
+        return class_teacher_allocations
+
+
+    def put_scheduledk(self, off_combination):
         class_teacher_allocations = {shift: [] for shift in self.shifts}
-        initial_teacher_list = []
         # reset all lesson numbers to calculate a new schedule:
         for cl in self.classes:
             cl.reset_lesson_numbers()
         for teacher in self.teachers:
             teacher.lesson_count = 0
+
 
         # process each day of week
         for day in Schedule.WEEKDAYS:
@@ -378,15 +627,13 @@ class Schedule():
                 # teachers and classes left after apply filters above
                 for teacher in teacher_list[shift]:
                     if not any(teacher.name in string for string in class_teacher_allocations[shift]): # check if teacher done
-                        class_teacher_allocations[shift].append('available teacher: ' + teacher.name)
+                        class_teacher_allocations[shift].append('redundant teacher: ' + teacher.name)
                 for cl in class_list[shift]:
                     if not any(cl.class_name in string for string in class_teacher_allocations[shift]): # check if this class done
                         temp = 'unprocessed class: ' + cl.class_name  + ' - native: ' + str(cl.get_native_need_rate()) + ' - main vn: ' + str(cl.get_main_vn_teacher_need_rate())
                         class_teacher_allocations[shift].append(temp)
 
-        #self.schedules[off_combination] = class_teacher_allocations
         return class_teacher_allocations
-
 
 
     def calculate_assessments(self, schedule):
@@ -413,7 +660,7 @@ class Schedule():
         asssessments['is not done'] = any('unprocessed class' in string for string in schedule_flat_list)
 
 
-        schedule_flat_list = filter(lambda x: 'available teacher' not in x and 'unprocessed class' not in x, schedule_flat_list) 
+        schedule_flat_list = filter(lambda x: 'redundant teacher' not in x and 'unprocessed class' not in x, schedule_flat_list) 
         schedule_flat_list = list(schedule_flat_list)
         #==============
         # TỈ LỆ ĐÚNG LỚP
@@ -448,12 +695,7 @@ class Schedule():
             #print(each_string, get_teacher_by_name(each_string).lesson_count)
         
 
-        '''
-        print('number of lessons having main teachers: {}/{} lessons'.format(right_teacher_count,len(schedule_flat_list)))
-        print('number of lessons having native teachers: {}/{} lessons'.format(native_teacher_count,len(schedule_flat_list)))
-        print('number of lessons using vn parttime teachers: {}/{} lessons'.format(parttime_teacher_count,len(schedule_flat_list)))
-        print('teacher lessont count balance rate: {}/{} ({})'.format(min(lesson_counts),max(lesson_counts),min(lesson_counts)/max(lesson_counts)))
-        '''
+        
         asssessments['native usage'] = native_teacher_count/len(schedule_flat_list)
         asssessments['main teacher'] = right_teacher_count/len(schedule_flat_list)
         asssessments['parttime usage'] = parttime_teacher_count/len(schedule_flat_list)
@@ -471,11 +713,7 @@ class Schedule():
 
     def print_schedule(self, schedule):
         self.calculate_assessments(schedule)
-        shifts = ["mon-17h40-19h10", "mon-19h20-20h50", "tue-17h40-19h10", "tue-19h20-20h50", 
-            "wed-17h40-19h10", "wed-19h20-20h50", "thu-17h40-19h10", "thu-19h20-20h50", 
-            "fri-17h40-19h10", "fri-19h20-20h50", "sat-08h00-09h30", "sat-09h50-11h20", 
-            "sat-17h40-19h10", "sat-19h20-20h50", "sun-08h00-09h30", "sun-09h50-11h20"]
-        for shift in shifts:
+        for shift in self.shifts:
             #continue # note: ngung print de test
             try:
                 for each in schedule[shift]:
@@ -485,305 +723,32 @@ class Schedule():
                 pass
             except Exception as e:
                 pass
+
         print('\n')
-
-
-
 
     def find_best_schedule(self):
         i=0
-        schedules = {}
+        s = time.time()
         number_of_combinations, off_combinations = self.create_off_combinations()
-        print(number_of_combinations)
-        if number_of_combinations>10000:
-            print('qua giới hạn xử lý')
-            return
-
         for off_combination in off_combinations:
-            off_combination_flat = ', '.join([item for sublist in off_combination for item in sublist])
-            print(off_combination_flat)
-            schedule = self.put_schedule_week(off_combination)
-            if schedule!=False:
-                schedules[off_combination_flat] = schedule
-            i+=1
-            if i==1000:
-                break
 
-        best_off_combination, best_schedule = self.filter_best_schedule(schedules)
-        self.print_schedule(best_schedule)
-        print(best_off_combination)
+            s = time.time()
 
+            #print(off_combination)
+            result_schedule = self.put_schedule(off_combination)
+            if result_schedule!=False:
 
+                # print only native
+                for each in off_combination:
+                    if 'Andre' in ','.join(each) or 'Matt' in ','.join(each):
+                        print(each)
 
-
-
-
-
-'''
-
-
-    def put_schedule_day(self, off_combination, day, update=False):
-
-        class_teacher_allocations = {shift: [] for shift in self.shifts if day in shift}
-
-        # get available teacher
-        available_teachers = [teacher for teacher in self.teachers
-                              if not any(teacher.name in element for element in off_combination)]
-
-        # get shift then filter shift on the processing day
-        day_shifts = list(filter(lambda shift: day in shift, self.shifts))
-        class_list = {shift: [] for shift in day_shifts}
-        teacher_list = {shift: [] for shift in day_shifts}
-
-        # create class list and teacher list for a shift in the proccessing day
-        for shift in day_shifts:
-            class_list[shift] = [cl for cl in self.classes
-                                 if shift in cl.time_frames]
-            teacher_list[shift] = available_teachers
-
-
-        #ALLOCATIONS:
-        for shift in day_shifts:
-            if len(teacher_list[shift]) < len(class_list[shift]):
-                return False #'not enough teachers for this case'
-
-            # sort the class_list based on native percentage
-            temp_list_to_reorder_classes = [cl.get_native_need_rate() for cl in class_list[shift]]
-            class_list[shift] = [cl for temp,cl in sorted(zip(temp_list_to_reorder_classes, class_list[shift]), key=lambda pair: pair[0])]
-
-            # allocate native teachers to their classes: regular or smartchoice based of the need of native rate
-            for cl in class_list[shift]:
-                if any(cl.class_name in string for string in class_teacher_allocations[shift]): continue # check if this class done
-                for teacher in teacher_list[shift]:
-                    if any(teacher.name in string for string in class_teacher_allocations[shift]): continue # check if teacher done
-                    # place native teacher to their main classes if possible, if not => next
-                    if cl.teacher is teacher and teacher.type=='ntfulltime':
-                        if cl.get_native_need_rate() < 100: # calcuate the percentage of native teacher in SC classes
-                            temp = cl.class_name + ' - ' +teacher.name + ' - native: ' + str(cl.get_native_need_rate()) + ' - main vn: ' + str(cl.get_main_vn_teacher_need_rate())
-                            class_teacher_allocations[shift].append(temp)
-                            cl.increase_native_lesson_count()
-                            cl.increase_learned_lesson_number()
-                            teacher.lesson_count_temp += 1
-                            break
-
-                if any(cl.class_name in string for string in class_teacher_allocations[shift]): continue # check if this class done
-                for teacher in teacher_list[shift]:
-                    if any(teacher.name in string for string in class_teacher_allocations[shift]): continue # check if this teacher done
-                    # place native teacher to any in-need class
-                    if teacher.type in ['ntfulltime','ntparttime']:
-                        if cl.get_native_need_rate() < 100: # calcuate the percentage of native teacher 
-                            temp = cl.class_name + ' - ' +teacher.name + ' - native: ' + str(cl.get_native_need_rate()) + ' - main vn: ' + str(cl.get_main_vn_teacher_need_rate())
-                            class_teacher_allocations[shift].append(temp)
-                            cl.increase_native_lesson_count()
-                            cl.increase_learned_lesson_number()
-                            teacher.lesson_count_temp += 1
-                            break
-
-                # after this allocation, native teachers might not be allocated to any classes because the need rate is high
-                # need to allocate these teachers later
-
-
-            # allocate full time and part time vietnamese teachers to their classes: regular based of the need of vn rate
-            for cl in class_list[shift]:
-                if any(cl.class_name in string for string in class_teacher_allocations[shift]): continue # check if this class done
-                for teacher in teacher_list[shift]:
-                    if any(teacher.name in string for string in class_teacher_allocations[shift]): continue # check if teacher done
-                    # place full time vietnamese teacher to their main classes
-                    if cl.teacher is teacher and teacher.type=='vnfulltime':
-                        temp = cl.class_name + ' - ' +teacher.name + ' - native: ' + str(cl.get_native_need_rate()) + ' - main vn: ' + str(cl.get_main_vn_teacher_need_rate())
-                        class_teacher_allocations[shift].append(temp)
-                        cl.increase_main_vn_teacher_lesson_count()
-                        cl.increase_learned_lesson_number()
-                        teacher.lesson_count_temp += 1
-                        break
-
+                self.print_schedule(result_schedule)
+                i+=1
                 
-                    if cl.teacher is teacher and teacher.type=='vnparttime':
-                        if cl.get_main_vn_teacher_need_rate() < 66.7: #100*2/3 calcuate the percentage of vn partime main teacher in regular classes
-                            temp = cl.class_name + ' - ' +teacher.name + ' - native: ' + str(cl.get_native_need_rate()) + ' - main vn: ' + str(cl.get_main_vn_teacher_need_rate())
-                            class_teacher_allocations[shift].append(temp)
-                            cl.increase_main_vn_teacher_lesson_count()
-                            cl.increase_learned_lesson_number()
-                            teacher.lesson_count_temp += 1
-                            break
-            
-            # allocate full time native teachers to their classes, dont care about any rate
-            for cl in class_list[shift]:
-                if any(cl.class_name in string for string in class_teacher_allocations[shift]): continue # check if this class done
-                for teacher in teacher_list[shift]:
-                    if any(teacher.name in string for string in class_teacher_allocations[shift]): continue # check if teacher done
-                    # place native teacher to their main classes if possible, if not => next
-                    if cl.teacher is teacher and teacher.type == 'ntfulltime':
-                        temp = cl.class_name + ' - ' +teacher.name + ' - native: ' + str(cl.get_native_need_rate()) + ' - main vn: ' + str(cl.get_main_vn_teacher_need_rate())
-                        class_teacher_allocations[shift].append(temp)
-                        cl.increase_native_lesson_count()
-                        cl.increase_learned_lesson_number()
-                        teacher.lesson_count_temp += 1
-                        break
-        
+                if i==10: break
 
-            #==============================================
-            # allocate teachers left to classes
-            remaining_fulltime_teachers = []
-            for teacher in teacher_list[shift]:
-                if not any(teacher.name in string for string in class_teacher_allocations[shift]): # check if teacher done
-                    if teacher.type=='vnfulltime':
-                        remaining_fulltime_teachers.append(teacher)
-     
-            remaining_teachers = []
-            for teacher in teacher_list[shift]:
-                if not any(teacher.name in string for string in class_teacher_allocations[shift]): # check if teacher done
-                    remaining_teachers.append(teacher)
-
-            remaining_classes = []
-            for cl in class_list[shift]:
-                if not any(cl.class_name in string for string in class_teacher_allocations[shift]): # check if this class done
-                    remaining_classes.append(cl)
+            #print(i, number_of_combinations)
+            #print(time.time()-s, )
 
 
-            # get list of classes which have main teacher as parttime
-            temp_classes_for_part_time_teachers = []
-            temp_parttime_teachers_allocation = []
-            for cl in remaining_classes:
-                for teacher in remaining_teachers:
-                    if cl.teacher is teacher:
-                        temp_classes_for_part_time_teachers.append(cl)
-                        temp_parttime_teachers_allocation.append(teacher)
-                        break
-
-
-            # arrange remaining full time teachers to remaining classes which dont have main teacher 
-            for cl in remaining_classes:
-                if cl not in temp_classes_for_part_time_teachers:
-                    proper_teachers = []
-                    for teacher in remaining_teachers:
-                        if cl.class_name not in teacher.improper_class_names and teacher not in temp_parttime_teachers_allocation:
-                            if not any(teacher.name in string for string in class_teacher_allocations[shift]):
-                                proper_teachers.append(teacher)
-                
-                    least_busy_teacher = self.get_least_busy_teacher(proper_teachers, 'vnfulltime')
-                    if least_busy_teacher!=None:
-                        temp = 'arrange remaining full time teachers to remaining classes which dont have main teacher ' + cl.class_name + ' - ' +least_busy_teacher.name + ' - native: ' + str(cl.get_native_need_rate()) + ' - main vn: ' + str(cl.get_main_vn_teacher_need_rate())
-                        class_teacher_allocations[shift].append(temp)
-                        cl.increase_learned_lesson_number()
-                        teacher.lesson_count_temp += 1
-
-
-
-            # arrange remaining part time teachers remaining classes which dont have main teacher 
-            for cl in remaining_classes:
-                if any(cl.class_name in string for string in class_teacher_allocations[shift]): continue # check if this class done
-                if cl not in temp_classes_for_part_time_teachers:
-                    proper_teachers = []
-                    for teacher in remaining_teachers:
-                        if cl.class_name not in teacher.improper_class_names and teacher not in temp_parttime_teachers_allocation:
-                            if not any(teacher.name in string for string in class_teacher_allocations[shift]):
-                                proper_teachers.append(teacher)
-
-                    least_busy_teacher = self.get_least_busy_teacher(proper_teachers, 'vnparttime')
-                    if least_busy_teacher!=None:
-
-                        temp = 'arrange remaining part time teachers remaining classes which dont have main teacher ' + cl.class_name + ' - ' +least_busy_teacher.name + ' - native: ' + str(cl.get_native_need_rate()) + ' - main vn: ' + str(cl.get_main_vn_teacher_need_rate())
-                        class_teacher_allocations[shift].append(temp)
-                        cl.increase_learned_lesson_number()
-                        teacher.lesson_count_temp += 1
-
-            # TODO: 
-
-
-            # arrange remaining full time teachers to partime classes which have main teacher 
-            # todo: get check which class is proper to take back (random or priority)
-            for cl in temp_classes_for_part_time_teachers:
-                proper_teachers = []
-                for teacher in remaining_teachers:
-                    if cl.class_name not in teacher.improper_class_names:
-                        if not any(teacher.name in string for string in class_teacher_allocations[shift]):
-                            proper_teachers.append(teacher)
-                
-                least_busy_teacher = self.get_least_busy_teacher(proper_teachers, 'vnfulltime')
-                if least_busy_teacher!=None:
-                    temp = 'arrange remaining full time teachers to partime classes which have main teacher ' + cl.class_name + ' - ' +least_busy_teacher.name + ' - native: ' + str(cl.get_native_need_rate()) + ' - main vn: ' + str(cl.get_main_vn_teacher_need_rate())
-                    class_teacher_allocations[shift].append(temp)
-                    cl.increase_learned_lesson_number()
-                    teacher.lesson_count_temp += 1
-
-
-            # allocate part time vietnamese teachers to their classes remaining:
-            for cl in class_list[shift]:
-                if any(cl.class_name in string for string in class_teacher_allocations[shift]): continue # check if this class done
-                for teacher in teacher_list[shift]:
-                    if any(teacher.name in string for string in class_teacher_allocations[shift]): continue # check if teacher done
-                    # place full time vietnamese teacher to their main classes
-                    if cl.teacher is teacher:
-                        temp = cl.class_name + ' - ' +teacher.name + ' - native: ' + str(cl.get_native_need_rate()) + ' - main vn: ' + str(cl.get_main_vn_teacher_need_rate())
-                        class_teacher_allocations[shift].append(temp)
-                        cl.increase_main_vn_teacher_lesson_count()
-                        cl.increase_learned_lesson_number()
-                        teacher.lesson_count_temp += 1
-                        break
-
-            # teachers and classes left after apply filters above
-            for teacher in teacher_list[shift]:
-                if not any(teacher.name in string for string in class_teacher_allocations[shift]): # check if teacher done
-                    class_teacher_allocations[shift].append('available teacher: ' + teacher.name)
-            for cl in class_list[shift]:
-                if not any(cl.class_name in string for string in class_teacher_allocations[shift]): # check if this class done
-                    temp = 'unprocessed class: ' + cl.class_name  + ' - native: ' + str(cl.get_native_need_rate()) + ' - main vn: ' + str(cl.get_main_vn_teacher_need_rate())
-                    class_teacher_allocations[shift].append(temp)
-
-            if update==True:
-                for cl in self.classes:
-                    cl.update_lesson_numbers()
-                for teacher in self.teachers:
-                    teacher.lesson_count = teacher.lesson_count_temp
-            else:
-                for cl in self.classes:
-                    cl.reset_lesson_numbers()
-                for teacher in self.teachers:
-                    teacher.lesson_count_temp = teacher.lesson_count
-
-
-        return class_teacher_allocations
-
-
-
-
-    def create_off_combinations_a_day(self, day):
-        groups = []
-        off_possibilities = []
-        sure_off_teachers = set()
-        max_number_classes = 0
-        for shift in self.shifts:
-            if day in shift:
-                number_classes = len([cl for cl in self.classes if shift in cl.time_frames]) 
-                if number_classes > max_number_classes:
-                    max_number_classes = number_classes
-
-
-        for teacher in self.teachers:
-            days_off_possibilities = teacher.get_days_off_possibilities()
-            print(days_off_possibilities)
-            for possibility in days_off_possibilities:
-                if any(day in string for string in possibility):
-                    off_possibilities.append(teacher.name)
-
-            if day in teacher.predefined_days_off:
-                sure_off_teachers.add(teacher.name)
-
-
-        off_possibilities = set(off_possibilities)
-        off_combinations = []
-        for r in range(0,len(self.teachers)-max_number_classes+1):
-            off_combinations.extend(itertools.combinations(off_possibilities, r))
-
-        temp_off_combinations = []
-        for off_combination in off_combinations:
-            if sure_off_teachers.issubset(set(off_combination)):
-                temp_off_combinations.append(off_combination)
-
-        return temp_off_combinations
-
-
-
-
-'''
